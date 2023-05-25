@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# Examples:
+#
+#   Build for desktop
+#   > ./build.sh build release arm64-apple-macosx
+#
+#   Build for iphone
+#   > ./build.sh build release arm64-apple-ios14.0
+
+
 #--------------------------------------------------------------------
 # Script params
 
@@ -44,9 +53,9 @@ gitCheckout()
         Log "Checking out: ${LIBGIT} -> ${LIBGITVER}"
         git clone ${LIBGIT} ${LIBBUILD}
         if [ ! -z "${LIBGITVER}" ]; then
-            cd "${LIBBUILD}"
-            git checkout ${LIBGITVER}
-            cd "${BUILDOUT}"
+            git clone -b ${LIBGITVER} ${LIBGIT} ${LIBBUILD}
+        else
+            git clone ${LIBGIT} ${LIBBUILD}
         fi
     fi
 
@@ -75,6 +84,20 @@ fi
 if [ -z "${BUILDTARGET}" ]; then
     BUILDTARGET="arm64-apple-macosx"
 fi
+
+if [[ $BUILDTARGET == *"ios"* ]]; then
+    OS="ios"
+else
+    OS="macos"
+fi
+
+if [[ $BUILDTARGET == *"arm64"* ]]; then
+    ARCH="arm64"
+else
+    ARCH="x86_64"
+fi
+
+TARGET="${OS}-${ARCH}"
 
 NUMCPUS=$(sysctl -n hw.physicalcpu)
 
@@ -109,25 +132,19 @@ if [ ! -d "$BUILDOUT" ]; then
     exitWithError "Failed to create diretory : $BUILDOUT"
 fi
 
+LIBROOT="${BUILDOUT}/${TARGET}/lib3"
+LIBINST="${BUILDOUT}/${TARGET}/install"
 
-LIBROOT="${BUILDOUT}/lib3"
-LIBINSTFULL="${BUILDOUT}/install/${BUILDTARGET}/${BUILDTYPE}"
-
-# iOS toolchain
-if [[ $BUILDTARGET == *"ios"* ]]; then
-    OS="ios"
-    ARCH="arm64"
-    gitCheckout "https://github.com/leetal/ios-cmake.git" "4.3.0" "${LIBROOT}/ios-cmake"
-    TOOLCHAIN="-DCMAKE_TOOLCHAIN_FILE=${LIBROOT}/ios-cmake/ios.toolchain.cmake -DPLATFORM=OS64"
-else
-    OS="mac"
-    ARCH="arm64"
-fi
-
-TARGET="${OS}-${ARCH}"
 PKGNAME="${LIBNAME}.a.xcframework"
 PKGROOT="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}"
 PKGOUT="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}.zip"
+
+# iOS toolchain
+if [[ $BUILDTARGET == *"ios"* ]]; then
+    gitCheckout "https://github.com/leetal/ios-cmake.git" "4.3.0" "${LIBROOT}/ios-cmake"
+    TOOLCHAIN="-DCMAKE_TOOLCHAIN_FILE=${LIBROOT}/ios-cmake/ios.toolchain.cmake -DPLATFORM=OS64"
+fi
+
 
 #--------------------------------------------------------------------
 echo ""
@@ -158,16 +175,17 @@ if [ ! -d "${LIBROOT}" ]; then
 fi
 
 
+LIBBUILD="${LIBROOT}/${LIBNAME}"
+LIBBUILDOUT="${LIBBUILD}/build"
+LIBINSTFULL="${LIBINST}/${BUILDTARGET}/${BUILDTYPE}"
+
 #-------------------------------------------------------------------
 # Checkout and build library
 #-------------------------------------------------------------------
 if    [ ! -z "${REBUILDLIBS}" ] \
    || [ ! -d "${LIBROOT}/${LIBNAME}" ]; then
 
-    LIBBUILD="${LIBROOT}/${LIBNAME}"
-    LIBBUILDOUT="${LIBBUILD}/build"
-
-    rm -Rf "$LIBBUILD" "$PKGROOT"
+    rm -Rf "$LIBBUILD" "${PKGROOT}/${TARGET}"
     gitCheckout "https://github.com/open-source-parsers/jsoncpp.git" "1.9.5" "${LIBBUILD}"
 
     Log "Rebuilding ${LIBNAME}"
@@ -175,8 +193,8 @@ if    [ ! -z "${REBUILDLIBS}" ] \
     cd "${LIBBUILD}"
 
     cmake . -B ./build -DCMAKE_BUILD_TYPE=${BUILDTYPE} \
-                       ${TOOLCHAIN} \
-                       -DCMAKE_INSTALL_PREFIX="${LIBINSTFULL}"
+                    ${TOOLCHAIN} \
+                    -DCMAKE_INSTALL_PREFIX="${LIBINSTFULL}"
 
     cmake --build ./build -j$NUMCPUS
 
@@ -186,14 +204,18 @@ if    [ ! -z "${REBUILDLIBS}" ] \
 fi
 
 #-------------------------------------------------------------------
-# Create package
+# Create target package
 #-------------------------------------------------------------------
 if    [ ! -z "${REBUILDLIBS}" ] \
-   || [ ! -f "${PKGOUT}" ]; then
+   || [ ! -f "${PKGROOT}/${TARGET}" ]; then
 
     INCPATH="include"
     LIBPATH="${LIBNAME}.a"
 
+    # Re initialize directory
+    if [ -d "${PKGROOT}/${TARGET}" ]; then
+        rm -Rf "${PKGROOT}/${TARGET}"
+    fi
     mkdir -p "${PKGROOT}/${TARGET}"
 
     # Copy include files
@@ -204,18 +226,52 @@ if    [ ! -z "${REBUILDLIBS}" ] \
     cp -R "${LIBINSTFULL}/lib/${LIBNAME}.a" "${PKGROOT}/${TARGET}/"
 
     # Copy manifest
-    cp "${ROOTDIR}/Info.plist.in" "${PKGROOT}/Info.plist"
-    sed -i '' "s#%%OS%%#${OS}#g" "${PKGROOT}/Info.plist"
-    sed -i '' "s#%%ARCH%%#${ARCH}#g" "${PKGROOT}/Info.plist"
-    sed -i '' "s#%%INCPATH%%#${INCPATH}#g" "${PKGROOT}/Info.plist"
-    sed -i '' "s#%%LIBPATH%%#${LIBPATH}#g" "${PKGROOT}/Info.plist"
+    cp "${ROOTDIR}/Info.target.plist.in" "${PKGROOT}/${TARGET}/Info.target.plist"
+    sed -i '' "s|%%OS%%|${OS}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
+    sed -i '' "s|%%ARCH%%|${ARCH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
+    sed -i '' "s|%%INCPATH%%|${INCPATH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
+    sed -i '' "s|%%LIBPATH%%|${LIBPATH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
 
-    # Create package
-    cd "${PKGROOT}/.."
-    zip -r "${PKGOUT}" "$PKGNAME" -x "*.DS_Store"
-    cd "${BUILDOUT}"
+fi
 
-    # Calculate sha256
-    openssl dgst -sha256 < "${PKGOUT}" > "${PKGOUT}.sha256.txt"
 
+#-------------------------------------------------------------------
+# Create full package
+#-------------------------------------------------------------------
+if [ -d "${PKGROOT}" ]; then
+
+    cd "${PKGROOT}"
+
+    TARGETINFO=
+    for SUB in */; do
+        echo "Adding: $SUB"
+        if [ -f "${SUB}/Info.target.plist" ]; then
+            TARGETINFO="$TARGETINFO$(cat "${SUB}/Info.target.plist")"
+        fi
+    done
+
+    if [ ! -z "$TARGETINFO" ]; then
+
+        TARGETINFO=""${TARGETINFO//$'\n'/\\n}""
+
+        cp "${ROOTDIR}/Info.plist.in" "${PKGROOT}/Info.plist"
+        sed -i '' "s|%%TARGETS%%|${TARGETINFO}|g" "${PKGROOT}/Info.plist"
+
+        cd "${PKGROOT}/.."
+
+        # Remove old package if any
+        if [ -f "$PKGNAME" ]; then
+            rm "$PKGNAME"
+        fi
+
+        # Create new package
+        zip -r "${PKGOUT}" "$PKGNAME" -x "*.DS_Store"
+        # touch "${PKGOUT}"
+
+        # Calculate sha256
+        openssl dgst -sha256 < "${PKGOUT}" > "${PKGOUT}.zip.sha256.txt"
+
+        cd "${BUILDOUT}"
+
+    fi
 fi
