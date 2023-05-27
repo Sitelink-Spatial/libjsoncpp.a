@@ -7,6 +7,22 @@
 #
 #   Build for iphone
 #   > ./build.sh build release arm64-apple-ios14.0
+#
+#   Build for iphone
+#   > ./build.sh build release x86_64-apple-ios14.0-simulator
+
+# Package layout
+#
+# ├── Info.plist
+# ├── [ios-arm64]
+# │     ├── mylib.a
+# │     └── [include]
+# ├── [ios-arm64_x86_64-simulator]
+# │     ├── mylib.a
+# │     └── [include]
+# └── [macos-arm64_x86_64]
+#       ├── mylib.a
+#       └── [include]
 
 
 #--------------------------------------------------------------------
@@ -20,7 +36,7 @@ BUILDWHAT="$1"
 # Build type (release, debug)
 BUILDTYPE="$2"
 
-# Build target, i.e. arm64-apple-macosx, aarch64-apple-ios11.0, x86_64-apple-ios13.0-simulator, ...
+# Build target, i.e. arm64-apple-macosx, aarch64-apple-ios14.0, x86_64-apple-ios14.0-simulator, ...
 BUILDTARGET="$3"
 
 # Build Output
@@ -44,16 +60,15 @@ exitWithError()
 
 gitCheckout()
 {
-    LIBGIT="$1"
-    LIBGITVER="$2"
-    LIBBUILD="$3"
+    local LIBGIT="$1"
+    local LIBGITVER="$2"
+    local LIBBUILD="$3"
 
     # Check out c++ library if needed
     if [ ! -d "${LIBBUILD}" ]; then
         Log "Checking out: ${LIBGIT} -> ${LIBGITVER}"
-        git clone ${LIBGIT} ${LIBBUILD}
         if [ ! -z "${LIBGITVER}" ]; then
-            git clone -b ${LIBGITVER} ${LIBGIT} ${LIBBUILD}
+            git clone --depth 1 -b ${LIBGITVER} ${LIBGIT} ${LIBBUILD}
         else
             git clone ${LIBGIT} ${LIBBUILD}
         fi
@@ -85,20 +100,30 @@ if [ -z "${BUILDTARGET}" ]; then
     BUILDTARGET="arm64-apple-macosx"
 fi
 
+# ios-arm64_x86_64-simulator
 if [[ $BUILDTARGET == *"ios"* ]]; then
-    OS="ios"
+    if [[ $BUILDTARGET == *"simulator"* ]]; then
+        TGT_OS="ios-simulator"
+    else
+    TGT_OS="ios"
+    fi
 else
-    OS="macos"
+    TGT_OS="macos"
 fi
 
 if [[ $BUILDTARGET == *"arm64"* ]]; then
-    ARCH="arm64"
+    if [[ $BUILDTARGET == *"x86_64"* ]]; then
+        TGT_ARCH="arm64_x86_64"
+    else
+        TGT_ARCH="arm64"
+    fi
 else
-    ARCH="x86_64"
+    TGT_ARCH="x86_64"
 fi
 
-TARGET="${OS}-${ARCH}"
+TARGET="${TGT_OS}-${TGT_ARCH}"
 
+# NUMCPUS=1
 NUMCPUS=$(sysctl -n hw.physicalcpu)
 
 #--------------------------------------------------------------------
@@ -141,8 +166,39 @@ PKGOUT="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}.zip"
 
 # iOS toolchain
 if [[ $BUILDTARGET == *"ios"* ]]; then
+
     gitCheckout "https://github.com/leetal/ios-cmake.git" "4.3.0" "${LIBROOT}/ios-cmake"
-    TOOLCHAIN="-DCMAKE_TOOLCHAIN_FILE=${LIBROOT}/ios-cmake/ios.toolchain.cmake -DPLATFORM=OS64"
+
+    if [[ $BUILDWHAT == *"xbuild"* ]]; then
+        TOOLCHAIN="-GXcode"
+    fi
+
+    # https://github.com/leetal/ios-cmake/blob/master/ios.toolchain.cmake
+    if [[ $BUILDTARGET == *"simulator"* ]]; then
+        if [ "${TGT_ARCH}" == "x86" ]; then
+            TGT_PLATFORM="SIMULATOR"
+        elif [ "${TGT_ARCH}" == "x86_64" ]; then
+            TGT_PLATFORM="SIMULATOR64"
+        else
+            TGT_PLATFORM="SIMULATORARM64"
+        fi
+    else
+        TOOLCHAIN=
+        if [ "${TGT_ARCH}" == "x86" ]; then
+            TGT_PLATFORM="OS"
+        elif [ "${TGT_ARCH}" == "x86_64" ]; then
+            TGT_ARCH="arm64_x86_64"
+            TGT_PLATFORM="OS64COMBINED"
+        else
+            TGT_PLATFORM="OS64"
+        fi
+    fi
+
+    TOOLCHAIN="${TOOLCHAIN} \
+               -DCMAKE_TOOLCHAIN_FILE=${LIBROOT}/ios-cmake/ios.toolchain.cmake \
+               -DPLATFORM=${TGT_PLATFORM} \
+               -DENABLE_BITCODE=OFF \
+               "
 fi
 
 
@@ -156,6 +212,7 @@ Log "BUILDTARGET    : ${BUILDTARGET}"
 Log "ROOTDIR        : ${ROOTDIR}"
 Log "BUILDOUT       : ${BUILDOUT}"
 Log "TARGET         : ${TARGET}"
+Log "PLATFORM       : ${TGT_PLATFORM}"
 Log "PKGNAME        : ${PKGNAME}"
 Log "PKGROOT        : ${PKGROOT}"
 Log "LIBROOT        : ${LIBROOT}"
@@ -188,17 +245,39 @@ if    [ ! -z "${REBUILDLIBS}" ] \
     rm -Rf "$LIBBUILD" "${PKGROOT}/${TARGET}"
     gitCheckout "https://github.com/open-source-parsers/jsoncpp.git" "1.9.5" "${LIBBUILD}"
 
-    Log "Rebuilding ${LIBNAME}"
+    Log "Building ${LIBNAME}"
 
     cd "${LIBBUILD}"
 
+    echo "\n====================== CONFIGURING =====================\n"
     cmake . -B ./build -DCMAKE_BUILD_TYPE=${BUILDTYPE} \
                     ${TOOLCHAIN} \
+                    -DCMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH=YES \
                     -DCMAKE_INSTALL_PREFIX="${LIBINSTFULL}"
 
-    cmake --build ./build -j$NUMCPUS
+    if [[ $BUILDWHAT == *"xbuild"* ]]; then
 
-    cmake --install ./build
+        echo "\n==================== XCODE BUILDING ====================\n"
+
+        # Get targets: xcodebuild -list -project mylib.xcodeproj
+        xcodebuild -project "${LIBBUILDOUT}/jsoncpp.xcodeproj" \
+                   -target jsoncpp_static \
+                   -configuration Release \
+                   -sdk iphonesimulator
+
+        mkdir -p "${LIBINSTFULL}/include"
+        cp -R "${LIBROOT}/${LIBNAME}/include/." "${LIBINSTFULL}/include/"
+
+        mkdir -p "${LIBINSTFULL}/lib"
+        cp -R "${LIBBUILDOUT}/lib/Release/." "${LIBINSTFULL}/lib/"
+
+    else
+        echo "\n======================= BUILDING =======================\n"
+        cmake --build ./build -j$NUMCPUS
+
+        echo "\n====================== INSTALLING ======================\n"
+        cmake --install ./build
+    fi
 
     cd "${BUILDOUT}"
 fi
@@ -221,14 +300,20 @@ if    [ ! -z "${REBUILDLIBS}" ] \
     # Copy include files
     mkdir -p "${PKGROOT}/${TARGET}/include"
     cp -R "${LIBINSTFULL}/include/." "${PKGROOT}/${TARGET}/include/"
+    if [ -z "$(ls -A "${PKGROOT}/${TARGET}/include/")" ]; then
+        exitWithError "Failed to copy include files"
+    fi
 
     # Copy lib file
     cp -R "${LIBINSTFULL}/lib/${LIBNAME}.a" "${PKGROOT}/${TARGET}/"
+    if [ ! -f "${PKGROOT}/${TARGET}/${LIBNAME}.a" ]; then
+        exitWithError "Failed to copy library file: ${LIBNAME}.a"
+    fi
 
     # Copy manifest
     cp "${ROOTDIR}/Info.target.plist.in" "${PKGROOT}/${TARGET}/Info.target.plist"
-    sed -i '' "s|%%OS%%|${OS}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
-    sed -i '' "s|%%ARCH%%|${ARCH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
+    sed -i '' "s|%%OS%%|${TGT_OS}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
+    sed -i '' "s|%%ARCH%%|${TGT_ARCH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
     sed -i '' "s|%%INCPATH%%|${INCPATH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
     sed -i '' "s|%%LIBPATH%%|${LIBPATH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
 
@@ -260,8 +345,8 @@ if [ -d "${PKGROOT}" ]; then
         cd "${PKGROOT}/.."
 
         # Remove old package if any
-        if [ -f "$PKGNAME" ]; then
-            rm "$PKGNAME"
+        if [ -f "${PKGOUT}" ]; then
+            rm "${PKGOUT}"
         fi
 
         # Create new package
@@ -269,7 +354,7 @@ if [ -d "${PKGROOT}" ]; then
         # touch "${PKGOUT}"
 
         # Calculate sha256
-        openssl dgst -sha256 < "${PKGOUT}" > "${PKGOUT}.zip.sha256.txt"
+        openssl dgst -sha256 < "${PKGOUT}" > "${PKGOUT}.sha256.txt"
 
         cd "${BUILDOUT}"
 
