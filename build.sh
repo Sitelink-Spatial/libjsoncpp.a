@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# https://rhonabwy.com/2023/02/10/creating-an-xcframework/
+
 # Examples:
 #
 #   Build for desktop
@@ -102,11 +104,7 @@ fi
 
 # ios-arm64_x86_64-simulator
 if [[ $BUILDTARGET == *"ios"* ]]; then
-    if [[ $BUILDTARGET == *"simulator"* ]]; then
-        TGT_OS="ios-simulator"
-    else
     TGT_OS="ios"
-    fi
 else
     TGT_OS="macos"
 fi
@@ -114,14 +112,23 @@ fi
 if [[ $BUILDTARGET == *"arm64"* ]]; then
     if [[ $BUILDTARGET == *"x86_64"* ]]; then
         TGT_ARCH="arm64_x86_64"
+    elif [[ $BUILDTARGET == *"x86"* ]]; then
+        TGT_ARCH="arm64_x86"
     else
         TGT_ARCH="arm64"
     fi
-else
+elif [[ $BUILDTARGET == *"x86_64"* ]]; then
     TGT_ARCH="x86_64"
+elif [[ $BUILDTARGET == *"x86"* ]]; then
+    TGT_ARCH="x86"
+else
+    exitWithError "Invalid architecture : $BUILDTARGET"
 fi
 
-TARGET="${TGT_OS}-${TGT_ARCH}"
+TGT_OPTS=
+if [[ $BUILDTARGET == *"simulator"* ]]; then
+    TGT_OPTS="-simulator"
+fi
 
 # NUMCPUS=1
 NUMCPUS=$(sysctl -n hw.physicalcpu)
@@ -157,12 +164,14 @@ if [ ! -d "$BUILDOUT" ]; then
     exitWithError "Failed to create diretory : $BUILDOUT"
 fi
 
-LIBROOT="${BUILDOUT}/${TARGET}/lib3"
-LIBINST="${BUILDOUT}/${TARGET}/install"
+TARGET="${TGT_OS}-${TGT_ARCH}${TGT_OPTS}"
+
+LIBROOT="${BUILDOUT}/${BUILDTARGET}/lib3"
+LIBINST="${BUILDOUT}/${BUILDTARGET}/install"
 
 PKGNAME="${LIBNAME}.a.xcframework"
 PKGROOT="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}"
-PKGOUT="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}.zip"
+PKGFILE="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}.zip"
 
 # iOS toolchain
 if [[ $BUILDTARGET == *"ios"* ]]; then
@@ -170,7 +179,7 @@ if [[ $BUILDTARGET == *"ios"* ]]; then
     gitCheckout "https://github.com/leetal/ios-cmake.git" "4.3.0" "${LIBROOT}/ios-cmake"
 
     if [[ $BUILDWHAT == *"xbuild"* ]]; then
-        TOOLCHAIN="-GXcode"
+        TOOLCHAIN="${TOOLCHAIN} -GXcode"
     fi
 
     # https://github.com/leetal/ios-cmake/blob/master/ios.toolchain.cmake
@@ -183,7 +192,6 @@ if [[ $BUILDTARGET == *"ios"* ]]; then
             TGT_PLATFORM="SIMULATORARM64"
         fi
     else
-        TOOLCHAIN=
         if [ "${TGT_ARCH}" == "x86" ]; then
             TGT_PLATFORM="OS"
         elif [ "${TGT_ARCH}" == "x86_64" ]; then
@@ -194,6 +202,7 @@ if [[ $BUILDTARGET == *"ios"* ]]; then
         fi
     fi
 
+    TARGET="${TGT_OS}-${TGT_ARCH}${TGT_OPTS}"
     TOOLCHAIN="${TOOLCHAIN} \
                -DCMAKE_TOOLCHAIN_FILE=${LIBROOT}/ios-cmake/ios.toolchain.cmake \
                -DPLATFORM=${TGT_PLATFORM} \
@@ -252,7 +261,7 @@ if    [ ! -z "${REBUILDLIBS}" ] \
     echo "\n====================== CONFIGURING =====================\n"
     cmake . -B ./build -DCMAKE_BUILD_TYPE=${BUILDTYPE} \
                     ${TOOLCHAIN} \
-                    -DCMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH=YES \
+                    -DCMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH=NO \
                     -DCMAKE_INSTALL_PREFIX="${LIBINSTFULL}"
 
     if [[ $BUILDWHAT == *"xbuild"* ]]; then
@@ -312,10 +321,17 @@ if    [ ! -z "${REBUILDLIBS}" ] \
 
     # Copy manifest
     cp "${ROOTDIR}/Info.target.plist.in" "${PKGROOT}/${TARGET}/Info.target.plist"
+    sed -i '' "s|%%TARGET%%|${TARGET}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
     sed -i '' "s|%%OS%%|${TGT_OS}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
     sed -i '' "s|%%ARCH%%|${TGT_ARCH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
     sed -i '' "s|%%INCPATH%%|${INCPATH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
     sed -i '' "s|%%LIBPATH%%|${LIBPATH}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
+
+    EXTRA=
+    if [[ $BUILDTARGET == *"simulator"* ]]; then
+        EXTRA="<key>SupportedPlatformVariant</key><string>simulator</string>"
+    fi
+    sed -i '' "s|%%EXTRA%%|${EXTRA}|g" "${PKGROOT}/${TARGET}/Info.target.plist"
 
 fi
 
@@ -345,16 +361,16 @@ if [ -d "${PKGROOT}" ]; then
         cd "${PKGROOT}/.."
 
         # Remove old package if any
-        if [ -f "${PKGOUT}" ]; then
-            rm "${PKGOUT}"
+        if [ -f "${PKGFILE}" ]; then
+            rm "${PKGFILE}"
         fi
 
         # Create new package
-        zip -r "${PKGOUT}" "$PKGNAME" -x "*.DS_Store"
-        # touch "${PKGOUT}"
+        zip -r "${PKGFILE}" "$PKGNAME" -x "*.DS_Store"
+        # touch "${PKGFILE}"
 
         # Calculate sha256
-        openssl dgst -sha256 < "${PKGOUT}" > "${PKGOUT}.sha256.txt"
+        openssl dgst -sha256 < "${PKGFILE}" > "${PKGFILE}.sha256.txt"
 
         cd "${BUILDOUT}"
 
