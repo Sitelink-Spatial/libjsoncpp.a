@@ -5,13 +5,13 @@
 # Examples:
 #
 #   Build for desktop
-#   > ./build.sh build release arm64-apple-macosx
+#   > ./build.sh build release arm64-apple-macos13.0
 #
 #   Build for iphone
-#   > ./build.sh build release arm64-apple-ios14.0
+#   > ./build.sh build release arm64-apple-ios12.0
 #
 #   Build for iphone
-#   > ./build.sh build release x86_64-apple-ios14.0-simulator
+#   > ./build.sh build release x86_64-apple-ios12.0-simulator
 
 # Package layout
 #
@@ -38,7 +38,7 @@ BUILDWHAT="$1"
 # Build type (release, debug)
 BUILDTYPE="$2"
 
-# Build target, i.e. arm64-apple-macosx, aarch64-apple-ios14.0, x86_64-apple-ios14.0-simulator, ...
+# Build target, i.e. arm64-apple-macos13.0, aarch64-apple-ios12.0, x86_64-apple-ios12.0-simulator, ...
 BUILDTARGET="$3"
 
 # Build Output
@@ -60,6 +60,12 @@ exitWithError()
     exit -1
 }
 
+exitOnError()
+{
+    if [[ 0 -eq $? ]]; then return 0; fi
+    exitWithError $@
+}
+
 gitCheckout()
 {
     local LIBGIT="$1"
@@ -70,15 +76,32 @@ gitCheckout()
     if [ ! -d "${LIBBUILD}" ]; then
         Log "Checking out: ${LIBGIT} -> ${LIBGITVER}"
         if [ ! -z "${LIBGITVER}" ]; then
-            git clone --depth 1 -b ${LIBGITVER} ${LIBGIT} ${LIBBUILD}
+            git clone  --recurse-submodules --depth 1 -b ${LIBGITVER} ${LIBGIT} ${LIBBUILD}
         else
-            git clone ${LIBGIT} ${LIBBUILD}
+            git clone  --recurse-submodules ${LIBGIT} ${LIBBUILD}
         fi
     fi
 
     if [ ! -d "${LIBBUILD}" ]; then
         exitWithError "Failed to checkout $LIBGIT"
     fi
+}
+
+extractVersion()
+{
+    local tuple="$1"
+    local key="$2"
+    local version=""
+
+    IFS='-' read -ra components <<< "$tuple"
+    for component in "${components[@]}"; do
+        if [[ $component == ${key}* ]]; then
+        version="${component#$key}"
+        break
+        fi
+    done
+
+    echo "$version"
 }
 
 
@@ -99,7 +122,7 @@ if [ -z "${BUILDTYPE}" ]; then
 fi
 
 if [ -z "${BUILDTARGET}" ]; then
-    BUILDTARGET="arm64-apple-macosx"
+    BUILDTARGET="arm64-apple-macos"
 fi
 
 # ios-arm64_x86_64-simulator
@@ -135,12 +158,19 @@ NUMCPUS=$(sysctl -n hw.physicalcpu)
 
 #--------------------------------------------------------------------
 # Get root script path
+if [ ! -z "$0" ] && [ ! -z "$(which realpath)" ]; then
 SCRIPTPATH=$(realpath $0)
-if [ ! -z "$SCRIPTPATH" ]; then
-    ROOTDIR=$(dirname $SCRIPTPATH)
-else
-    SCRIPTPATH=.
-    ROOTDIR=.
+fi
+ROOTDIR="$GITHUB_WORKSPACE"
+if [ -z "$ROOTDIR" ]; then
+    if [[ -z "$SCRIPTPATH" ]] || [[ "." == "$SCRIPTPATH" ]]; then
+        ROOTDIR=$(pwd)
+    elif [ ! -z "$SCRIPTPATH" ]; then
+        ROOTDIR=$(dirname $SCRIPTPATH)
+    else
+        SCRIPTPATH=.
+        ROOTDIR=.
+    fi
 fi
 
 #--------------------------------------------------------------------
@@ -154,6 +184,9 @@ else
         BUILDOUT="$(pwd)"
     fi
 fi
+
+# Add build type to output folder
+BUILDOUT="${BUILDOUT}/${BUILDTYPE}"
 
 # Make custom output directory if it doesn't exist
 if [ ! -z "$BUILDOUT" ] && [ ! -d "$BUILDOUT" ]; then
@@ -170,11 +203,16 @@ LIBROOT="${BUILDOUT}/${BUILDTARGET}/lib3"
 LIBINST="${BUILDOUT}/${BUILDTARGET}/install"
 
 PKGNAME="${LIBNAME}.a.xcframework"
-PKGROOT="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}"
-PKGFILE="${BUILDOUT}/pkg/${BUILDTYPE}/${PKGNAME}.zip"
+PKGROOT="${BUILDOUT}/pkg/${PKGNAME}"
+PKGFILE="${BUILDOUT}/pkg/${PKGNAME}.zip"
 
 # iOS toolchain
 if [[ $BUILDTARGET == *"ios"* ]]; then
+
+    TGT_OSVER=$(extractVersion "$BUILDTARGET" "ios")
+    if [ -z "$TGT_OSVER" ]; then
+        TGT_OSVER="14.0"
+    fi
 
     gitCheckout "https://github.com/leetal/ios-cmake.git" "4.3.0" "${LIBROOT}/ios-cmake"
 
@@ -207,30 +245,58 @@ if [[ $BUILDTARGET == *"ios"* ]]; then
                -DCMAKE_TOOLCHAIN_FILE=${LIBROOT}/ios-cmake/ios.toolchain.cmake \
                -DPLATFORM=${TGT_PLATFORM} \
                -DENABLE_BITCODE=OFF \
+               -DDEPLOYMENT_TARGET=$TGT_OSVER \
+               "
+else
+    TGT_OSVER=$(extractVersion "$BUILDTARGET" "macos")
+    if [ -z "$TGT_OSVER" ]; then
+        TGT_OSVER="13.2"
+    fi
+
+    TOOLCHAIN="${TOOLCHAIN} \
+               -DCMAKE_OSX_DEPLOYMENT_TARGET=$TGT_OSVER \
+               -DCMAKE_OSX_ARCHITECTURES=$TGT_ARCH
                "
 fi
 
+TOOLCHAIN="${TOOLCHAIN} \
+            -DCMAKE_CXX_STANDARD=17 \
+            "
+
 
 #--------------------------------------------------------------------
-echo ""
-Log "#--------------------------------------------------------------------"
-Log "LIBNAME        : ${LIBNAME}"
-Log "BUILDWHAT      : ${BUILDWHAT}"
-Log "BUILDTYPE      : ${BUILDTYPE}"
-Log "BUILDTARGET    : ${BUILDTARGET}"
-Log "ROOTDIR        : ${ROOTDIR}"
-Log "BUILDOUT       : ${BUILDOUT}"
-Log "TARGET         : ${TARGET}"
-Log "PLATFORM       : ${TGT_PLATFORM}"
-Log "PKGNAME        : ${PKGNAME}"
-Log "PKGROOT        : ${PKGROOT}"
-Log "LIBROOT        : ${LIBROOT}"
-Log "#--------------------------------------------------------------------"
-echo ""
+showParams()
+{
+    echo ""
+    Log "#--------------------------------------------------------------------"
+    Log "LIBNAME        : ${LIBNAME}"
+    Log "BUILDWHAT      : ${BUILDWHAT}"
+    Log "BUILDTYPE      : ${BUILDTYPE}"
+    Log "BUILDTARGET    : ${BUILDTARGET}"
+    Log "ROOTDIR        : ${ROOTDIR}"
+    Log "BUILDOUT       : ${BUILDOUT}"
+    Log "TARGET         : ${TARGET}"
+    Log "OSVER          : ${TGT_OSVER}"
+    Log "ARCH           : ${TGT_ARCH}"
+    Log "PLATFORM       : ${TGT_PLATFORM}"
+    Log "PKGNAME        : ${PKGNAME}"
+    Log "PKGROOT        : ${PKGROOT}"
+    Log "LIBROOT        : ${LIBROOT}"
+    Log "#--------------------------------------------------------------------"
+    echo ""
+}
+showParams
+
 
 #-------------------------------------------------------------------
 # Rebuild lib and copy files if needed
 #-------------------------------------------------------------------
+if [[ $BUILDWHAT == *"clean"* ]]; then
+    if [ -d "${LIBROOT}" ]; then
+        rm -Rf "${LIBROOT}"
+    fi
+fi
+
 if [ ! -d "${LIBROOT}" ]; then
 
     Log "Reinitializing install..."
@@ -261,8 +327,11 @@ if    [ ! -z "${REBUILDLIBS}" ] \
     echo "\n====================== CONFIGURING =====================\n"
     cmake . -B ./build -DCMAKE_BUILD_TYPE=${BUILDTYPE} \
                     ${TOOLCHAIN} \
+                    -DJSONCPP_WITH_TESTS=OFF \
+                    -DJSONCPP_WITH_POST_BUILD_UNITTEST=OFF \
                     -DCMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH=NO \
                     -DCMAKE_INSTALL_PREFIX="${LIBINSTFULL}"
+    exitOnError "Failed to configure ${LIBNAME}"
 
     if [[ $BUILDWHAT == *"xbuild"* ]]; then
 
@@ -273,6 +342,7 @@ if    [ ! -z "${REBUILDLIBS}" ] \
                    -target jsoncpp_static \
                    -configuration Release \
                    -sdk iphonesimulator
+        exitOnError "Failed to xbuild ${LIBNAME}"
 
         mkdir -p "${LIBINSTFULL}/include"
         cp -R "${LIBROOT}/${LIBNAME}/include/." "${LIBINSTFULL}/include/"
@@ -283,9 +353,11 @@ if    [ ! -z "${REBUILDLIBS}" ] \
     else
         echo "\n======================= BUILDING =======================\n"
         cmake --build ./build -j$NUMCPUS
+        exitOnError "Failed to build ${LIBNAME}"
 
         echo "\n====================== INSTALLING ======================\n"
         cmake --install ./build
+        exitOnError "Failed to install ${LIBNAME}"
     fi
 
     cd "${BUILDOUT}"
@@ -295,7 +367,7 @@ fi
 # Create target package
 #-------------------------------------------------------------------
 if    [ ! -z "${REBUILDLIBS}" ] \
-   || [ ! -f "${PKGROOT}/${TARGET}" ]; then
+   || [ ! -d "${PKGROOT}/${TARGET}" ]; then
 
     INCPATH="include"
     LIBPATH="${LIBNAME}.a"
@@ -367,12 +439,13 @@ if [ -d "${PKGROOT}" ]; then
 
         # Create new package
         zip -r "${PKGFILE}" "$PKGNAME" -x "*.DS_Store"
-        # touch "${PKGFILE}"
 
         # Calculate sha256
-        openssl dgst -sha256 < "${PKGFILE}" > "${PKGFILE}.sha256.txt"
+        openssl dgst -sha256 -r < "${PKGFILE}" | cut -f1 -d' ' > "${PKGFILE}.sha256.txt"
 
         cd "${BUILDOUT}"
 
     fi
 fi
+
+showParams
