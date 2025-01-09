@@ -20,8 +20,8 @@ xcframework wrapper for libjsoncpp
 
     .binaryTarget(
         name: "libjsoncpp.a",
-        url: "https://github.com/Imajion/libjsoncpp.a/releases/download/r1/libjsoncpp.a.xcframework.zip",
-        checksum: "e42ab4061f371dbf2d1b3589eb13e45a5eb2fdafa6dce519a2df8bc9e554d8a3"
+        url: "https://github.com/Imajion/libjsoncpp.a/releases/download/r5/libjsoncpp.a.xcframework.zip",
+        checksum: "24c0c602e327f0c363b773ab9a14bee382ffa54dcc603294aee2f5a09d9d71c3"
     )
 
 ```
