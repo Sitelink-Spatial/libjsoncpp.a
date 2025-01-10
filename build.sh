@@ -238,7 +238,7 @@ if [[ $BUILDTARGET == *"ios"* ]]; then
     if [[ $BUILDTARGET == *"simulator"* ]]; then
         if [ "${TGT_ARCH}" == "x86" ]; then
             TGT_PLATFORM="SIMULATOR"
-        elif [ "${TGT_ARCH}" == "x86_64" ]; then
+        elif [[ "${TGT_ARCH}" == "x86_64" ]]; then
             TGT_PLATFORM="SIMULATOR64"
         else
             TGT_PLATFORM="SIMULATORARM64"
@@ -246,9 +246,11 @@ if [[ $BUILDTARGET == *"ios"* ]]; then
     else
         if [ "${TGT_ARCH}" == "x86" ]; then
             TGT_PLATFORM="OS"
-        elif [ "${TGT_ARCH}" == *"x86_64"* ]; then
+        elif [[ "${TGT_ARCH}" == *"x86_64"* ]]; then
             TGT_ARCH="arm64_x86_64"
             TGT_PLATFORM="OS64COMBINED"
+            TOOLCHAIN="${TOOLCHAIN} -GXcode"
+            NOINSTALL="YES"
         else
             TGT_PLATFORM="OS64"
         fi
